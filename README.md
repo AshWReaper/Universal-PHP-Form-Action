@@ -96,6 +96,7 @@ $config = [
     'host' => 'smtp.yourhost.com', 'port' => 465, 'secure' => 'ssl',
     'username' => 'smtp-user', 'password' => 'smtp-pass',
     'from_email' => 'no-reply@example.com', 'from_name' => 'Website',
+    'debug' => false, 'debug_level' => 2,
     'bcc' => [/* 'archive@example.com' */],
   ],
 
@@ -291,6 +292,7 @@ curl -i -X POST https://your.dev/form-action.php \
 - **"Failed to save uploaded file"**: check directory permissions/ownership and SELinux (`chcon -R -t httpd_sys_rw_content_t uploads logs`).
 - **Rate limited during testing**: remove files in `logs/ratelimit/` for your IP.
 - **No email delivered**: verify SMTP creds, firewall egress on 465/587, SPF/DKIM/DMARC alignment.
+- **Need send-failure details**: check `logs/form.log*` for `submit_fail` entries; you can enable SMTP debug with `'mail' => ['debug' => true]` to log the SMTP dialogue (use briefly; it may include auth dialogue).
 - **Big files rejected**: increase `upload_max_filesize`, `post_max_size`, and per‑field `max_mb`.
 - **Unexpected redirect**: your request wasn’t seen as AJAX; send `Accept: application/json`.
 

@@ -66,6 +66,9 @@ $config = [
 	'password'   => 'smtp-pass',
 	'from_email' => 'no-reply@example.com',
 	'from_name'  => 'Website',
+	// SMTP debug (PHPMailer only). Logs SMTP dialogue to form.log; use temporarily and avoid in production.
+	'debug'      => false,
+	'debug_level'=> 2, // 1-4 (PHPMailer SMTPDebug levels)
 	'bcc'        => [
 	    // 'archive@example.com'
 	],
@@ -674,12 +677,36 @@ if (!empty($fields['email']) && validate_email((string)$fields['email'])) {
 }
 
 // Send email (PHPMailer if available)
-$sendOk = false; $sendErr = null;
+$sendOk = false; $sendErr = null; $sendErrInfo = null; $sendErrType = null; $sendErrCode = null; $smtpDebug = [];
+$transport = $config['mail']['transport'] ?? 'mail';
+$mailerAvailable = class_exists('\\PHPMailer\\PHPMailer\\PHPMailer');
+$mailerUsed = $mailerAvailable ? 'phpmailer' : 'mail';
+$attachCount = count(array_filter($savedFiles, fn($sf) => !empty($sf['attach'])));
+$sendCtxBase = [
+    'rid' => $rid,
+    'ip'  => $ip,
+    'form'=> $formId,
+    'mailer' => $mailerUsed,
+    'mailer_available' => $mailerAvailable,
+    'transport_requested' => $transport,
+    'to_count' => count($recipients),
+    'bcc_count' => count($config['mail']['bcc'] ?? []),
+    'attachments' => $attachCount,
+];
+if ($transport === 'smtp') {
+    $sendCtxBase['smtp'] = [
+	'host' => $config['mail']['host'] ?? null,
+	'port' => (int)($config['mail']['port'] ?? 0),
+	'secure' => $config['mail']['secure'] ?? '',
+	'auth' => true,
+	'username_set' => !empty($config['mail']['username']),
+    ];
+}
 
-if (class_exists('\\PHPMailer\\PHPMailer\\PHPMailer')) {
+if ($mailerAvailable) {
     try {
 	$mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-	if ($config['mail']['transport'] === 'smtp') {
+	if ($transport === 'smtp') {
 	    $mail->isSMTP();
 	    $mail->Host       = $config['mail']['host'];
 	    $mail->Port       = (int)$config['mail']['port'];
@@ -688,6 +715,12 @@ if (class_exists('\\PHPMailer\\PHPMailer\\PHPMailer')) {
 	    $mail->SMTPAuth   = true;
 	    $mail->Username   = $config['mail']['username'];
 	    $mail->Password   = $config['mail']['password'];
+	    if (!empty($config['mail']['debug'])) {
+		$mail->SMTPDebug = (int)($config['mail']['debug_level'] ?? 2);
+		$mail->Debugoutput = function ($str, $level) use (&$smtpDebug) {
+		    $smtpDebug[] = ['level' => $level, 'message' => $str];
+		};
+	    }
 	}
 	$mail->CharSet = 'UTF-8';
 	$mail->setFrom($config['mail']['from_email'], $config['mail']['from_name']);
@@ -709,6 +742,9 @@ if (class_exists('\\PHPMailer\\PHPMailer\\PHPMailer')) {
 	$sendOk = true;
     } catch (\Throwable $e) {
 	$sendErr = 'Mailer error: ' . $e->getMessage();
+	$sendErrType = get_class($e);
+	$sendErrCode = $e->getCode();
+	if (isset($mail) && !empty($mail->ErrorInfo)) $sendErrInfo = $mail->ErrorInfo;
     }
 } else {
     // Fallback to mail()
@@ -744,8 +780,17 @@ if (class_exists('\\PHPMailer\\PHPMailer\\PHPMailer')) {
     }
 
     $toHeader = implode(',', $recipients);
-    $sendOk = @mail($toHeader, $subject, $body, implode("\r\n", $headers));
-    if (!$sendOk) $sendErr = 'mail() returned false';
+    $mailWarning = null;
+    set_error_handler(function ($severity, $message) use (&$mailWarning) {
+	$mailWarning = $message;
+	return true; // suppress default warning output
+    });
+    $sendOk = mail($toHeader, $subject, $body, implode("\r\n", $headers));
+    restore_error_handler();
+    if (!$sendOk) {
+	$sendErr = 'mail() returned false';
+	if ($mailWarning) $sendErr .= '; warning: ' . $mailWarning;
+    }
 }
 
 // Cleanup uploaded files if not persisting
@@ -757,16 +802,22 @@ foreach ($savedFiles as $sf) {
 
 // Log and respond
 if ($sendOk) {
-    log_event($logFile, $config['logging'], 'info', 'submit_ok', [
-	'rid'=>$rid, 'ip'=>$ip, 'form'=>$formId, 'to'=>$recipients
-    ]);
+    log_event($logFile, $config['logging'], 'info', 'submit_ok', array_merge(
+	$sendCtxBase,
+	['to' => $recipients]
+    ));
     $payload = ['ok'=>true,'message'=>'Thank you.','request_id'=>$rid];
     if (!empty($config['debug'])) $payload['debug'] = ['rid'=>$rid];
     json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
 } else {
-    log_event($logFile, $config['logging'], 'error', 'submit_fail', [
-	'rid'=>$rid, 'ip'=>$ip, 'form'=>$formId, 'error'=>$sendErr
+    $errCtx = array_merge($sendCtxBase, [
+	'error' => $sendErr,
+	'error_info' => $sendErrInfo,
+	'error_type' => $sendErrType,
+	'error_code' => $sendErrCode,
+	'smtp_debug' => $smtpDebug ?: null,
     ]);
+    log_event($logFile, $config['logging'], 'error', 'submit_fail', $errCtx);
     $payload = ['ok'=>false,'message'=>'Sorry, something went wrong sending your message.','request_id'=>$rid];
     if (!empty($config['debug'])) $payload['debug'] = ['error'=>$sendErr,'rid'=>$rid];
     json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
