@@ -755,6 +755,9 @@ if ($mailerAvailable) {
     $fromEmail= $config['mail']['from_email'];
     $headers[] = 'From: ' . sprintf('"%s" <%s>', addslashes($fromName), $fromEmail);
     if ($replyToEmail) $headers[] = 'Reply-To: ' . $replyToEmail;
+    if (!empty($config['mail']['bcc'])) {
+	$headers[] = 'Bcc: ' . implode(',', $config['mail']['bcc']);
+    }
 
     $hasAttachments = array_filter($savedFiles, fn($sf)=>!empty($sf['attach']));
     if ($hasAttachments) {
@@ -804,7 +807,10 @@ foreach ($savedFiles as $sf) {
 if ($sendOk) {
     log_event($logFile, $config['logging'], 'info', 'submit_ok', array_merge(
 	$sendCtxBase,
-	['to' => $recipients]
+	[
+	    'to' => $recipients,
+	    'bcc' => $config['mail']['bcc'] ?? [],
+	]
     ));
     $payload = ['ok'=>true,'message'=>'Thank you.','request_id'=>$rid];
     if (!empty($config['debug'])) $payload['debug'] = ['rid'=>$rid];
@@ -816,6 +822,7 @@ if ($sendOk) {
 	'error_type' => $sendErrType,
 	'error_code' => $sendErrCode,
 	'smtp_debug' => $smtpDebug ?: null,
+	'bcc' => $config['mail']['bcc'] ?? [],
     ]);
     log_event($logFile, $config['logging'], 'error', 'submit_fail', $errCtx);
     $payload = ['ok'=>false,'message'=>'Sorry, something went wrong sending your message.','request_id'=>$rid];
