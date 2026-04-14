@@ -64,8 +64,8 @@ repo/
 5. In your form, include:
    ```html
    <input type="hidden" name="form_id" value="contact_basic">
-   <input type="hidden" name="form_ts" value="<?= time() ?>"> <!-- min-fill gate -->
-   <input type="text" name="company_website" style="display:none" tabindex="-1" autocomplete="off"> <!-- honeypot -->
+   <input type="hidden" name="form_ts" value="<?= time() ?>"> <!-- if min_fill is enabled -->
+   <input type="text" name="company_website" style="display:none" tabindex="-1" autocomplete="off"> <!-- if honeypot is enabled -->
    ```
 6. (If using reCAPTCHA v3) inject token into `g-recaptcha-response` before submit.
 7. Submit to `/form-action.php` and verify email/logs.
@@ -113,6 +113,16 @@ $config = [
   ],
 
   'security' => [
+    'features' => [
+      'honeypot' => true,
+      'min_fill' => true,
+      'csrf' => true,
+      'rate_limit' => true,
+      'recaptcha' => true,
+      'block_domains' => true,
+      'link_density' => true,
+      'idempotency' => true,
+    ],
     'honeypot_field' => 'company_website',
     'min_fill_seconds' => 3,
     'csrf' => false,
@@ -138,6 +148,13 @@ $config = [
 
     // Link density check applies to these long-text fields
     'long_text_fields' => ['message'],
+
+    // Optional per-form overrides
+    'security' => [
+      'features' => [
+        'min_fill' => false,
+      ],
+    ],
 
     // ✅ Multiple upload fields with per-field rules
     'files' => [
@@ -168,6 +185,25 @@ $config = [
 ```
 
 > **Note:** Inputs can be single (`name="cv"`) or multiple (`name="company_documents[]" multiple`). The script normalizes both.
+
+### CMS / cross-server forms
+If the form lives in a CMS that cannot render PHP values like `<?= time() ?>`, disable only the affected checks for that form:
+
+```php
+'sales_form' => [
+  'recipients' => ['sales@example.com'],
+  'required' => ['name','email','message'],
+  'security' => [
+    'features' => [
+      'min_fill' => false,
+      // optionally disable honeypot too if the CMS cannot add the hidden field
+      // 'honeypot' => false,
+    ],
+  ],
+],
+```
+
+That keeps other protections such as rate limiting, idempotency, and disposable-domain blocking enabled.
 
 ---
 
@@ -231,6 +267,7 @@ $config = [
 - **Header injection guard:** subjects/headers are stripped of CR/LF.
 - **Link density:** reject messages with > `max_links` URLs in designated long‑text fields.
 - **Disposable domains:** configurable blocklist (e.g., Mailinator).
+- Each check can be toggled globally in `security.features` or overridden per form in `forms.<form_id>.security.features`.
 
 ---
 

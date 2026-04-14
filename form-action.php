@@ -92,6 +92,16 @@ $config = [
 
     // Security features
     'security' => [
+	'features' => [
+	    'honeypot'     => true,
+	    'min_fill'     => true,
+	    'csrf'         => true,
+	    'rate_limit'   => true,
+	    'recaptcha'    => true,
+	    'block_domains'=> true,
+	    'link_density' => true,
+	    'idempotency'  => true,
+	],
 	'honeypot_field'   => 'company_website', // must be empty
 	'min_fill_seconds' => 3,                 // reject if quicker (needs form_ts)
 	'csrf'             => false,             // requires hidden 'csrf_token' + cookie OR header
@@ -313,6 +323,12 @@ function current_action(): string {
     return $_POST['recaptcha_action'] ?? 'submit';
 }
 
+function security_feature_enabled(array $config, array $formCfg, string $feature, bool $default = true): bool {
+    $global = $config['security']['features'][$feature] ?? $default;
+    $form = $formCfg['security']['features'][$feature] ?? null;
+    return $form === null ? (bool)$global : (bool)$form;
+}
+
 // ---------------------------
 // Main
 // ---------------------------
@@ -333,10 +349,18 @@ $ip  = client_ip();
 $ua  = $_SERVER['HTTP_USER_AGENT'] ?? '';
 $ref = $_SERVER['HTTP_REFERER'] ?? '';
 $now = time();
+$honeypotEnabled   = security_feature_enabled($config, $formCfg, 'honeypot');
+$minFillEnabled    = security_feature_enabled($config, $formCfg, 'min_fill');
+$csrfEnabled       = !empty($config['security']['csrf']) && security_feature_enabled($config, $formCfg, 'csrf');
+$rateLimitEnabled  = security_feature_enabled($config, $formCfg, 'rate_limit');
+$recaptchaEnabled  = !empty($config['recaptcha']['enabled']) && security_feature_enabled($config, $formCfg, 'recaptcha');
+$blockDomainChecks = security_feature_enabled($config, $formCfg, 'block_domains');
+$linkDensityChecks = security_feature_enabled($config, $formCfg, 'link_density');
+$idempotencyEnabled= security_feature_enabled($config, $formCfg, 'idempotency');
 
 // Honeypot
 $honeypotField = $config['security']['honeypot_field'] ?? '';
-if ($honeypotField && !empty($_POST[$honeypotField])) {
+if ($honeypotEnabled && $honeypotField && !empty($_POST[$honeypotField])) {
     log_event($logFile, $config['logging'], 'warn', 'honeypot_trigger', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId]);
     $payload = ['ok'=>true,'message'=>'Thank you.','request_id'=>$rid]; // Pretend success
     json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
@@ -345,7 +369,7 @@ if ($honeypotField && !empty($_POST[$honeypotField])) {
 
 // Time-to-fill gate
 $minSec = (int)($config['security']['min_fill_seconds'] ?? 0);
-if ($minSec > 0 && isset($_POST['form_ts'])) {
+if ($minFillEnabled && $minSec > 0 && isset($_POST['form_ts'])) {
     $started = (int)$_POST['form_ts'];
     if ($started > 0 && ($now - $started) < $minSec) {
 	log_event($logFile, $config['logging'], 'warn', 'min_time_gate', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId,'elapsed'=>$now-$started]);
@@ -356,7 +380,7 @@ if ($minSec > 0 && isset($_POST['form_ts'])) {
 }
 
 // CSRF (optional)
-if (!empty($config['security']['csrf'])) {
+if ($csrfEnabled) {
     $cookie = $_COOKIE['csrf_token'] ?? '';
     $token  = $_POST['csrf_token'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? '');
     if (!$cookie || !$token || !hash_equals($cookie, $token)) {
@@ -368,30 +392,32 @@ if (!empty($config['security']['csrf'])) {
 }
 
 // Rate limit
-$rateKey = hash('sha256', $formId . '|' . $ip);
-$rateFile = $rateDir . '/' . $rateKey . '.json';
-$window   = (int)$config['rate_limit']['window_sec'];
-$maxAtt   = (int)$config['rate_limit']['max_attempts'];
+if ($rateLimitEnabled) {
+    $rateKey = hash('sha256', $formId . '|' . $ip);
+    $rateFile = $rateDir . '/' . $rateKey . '.json';
+    $window   = (int)$config['rate_limit']['window_sec'];
+    $maxAtt   = (int)$config['rate_limit']['max_attempts'];
 
-$rateData = ['reset'=> $now + $window, 'count'=>0];
-if (is_file($rateFile)) {
-    $rateData = json_decode((string)@file_get_contents($rateFile), true) ?: $rateData;
-    if ($now > ($rateData['reset'] ?? 0)) {
-	$rateData = ['reset'=> $now + $window, 'count'=>0];
+    $rateData = ['reset'=> $now + $window, 'count'=>0];
+    if (is_file($rateFile)) {
+	$rateData = json_decode((string)@file_get_contents($rateFile), true) ?: $rateData;
+	if ($now > ($rateData['reset'] ?? 0)) {
+	    $rateData = ['reset'=> $now + $window, 'count'=>0];
+	}
     }
-}
-$rateData['count']++;
-@file_put_contents($rateFile, json_encode($rateData), LOCK_EX);
-if ($rateData['count'] > $maxAtt) {
-    $retry = max(1, (int)(($rateData['reset'] ?? $now) - $now));
-    log_event($logFile, $config['logging'], 'warn', 'rate_limited', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId,'retry_in'=>$retry]);
-    $payload = ['ok'=>false,'message'=>"Too many attempts. Try again in {$retry}s.",'request_id'=>$rid];
-    json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
-    exit;
+    $rateData['count']++;
+    @file_put_contents($rateFile, json_encode($rateData), LOCK_EX);
+    if ($rateData['count'] > $maxAtt) {
+	$retry = max(1, (int)(($rateData['reset'] ?? $now) - $now));
+	log_event($logFile, $config['logging'], 'warn', 'rate_limited', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId,'retry_in'=>$retry]);
+	$payload = ['ok'=>false,'message'=>"Too many attempts. Try again in {$retry}s.",'request_id'=>$rid];
+	json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
+	exit;
+    }
 }
 
 // reCAPTCHA v3 (optional)
-if (!empty($config['recaptcha']['enabled'])) {
+if ($recaptchaEnabled) {
     $token = $_POST['g-recaptcha-response'] ?? '';
     if (!$token) {
 	$payload = ['ok'=>false,'message'=>'Captcha verification required.','request_id'=>$rid];
@@ -467,7 +493,7 @@ foreach (($formCfg['rules'] ?? []) as $f => $rule) {
 }
 
 // Disposable domain block
-if (isset($fields['email']) && $fields['email']) {
+if ($blockDomainChecks && isset($fields['email']) && $fields['email']) {
     $domain = strtolower((string)substr(strrchr((string)$fields['email'], '@') ?: '', 1));
     if ($domain && in_array($domain, $config['security']['block_domains'] ?? [], true)) {
 	$errors['email'] = 'Please use a different email address';
@@ -477,7 +503,7 @@ if (isset($fields['email']) && $fields['email']) {
 // Link density check on long text fields
 $longFields = $formCfg['long_text_fields'] ?? [];
 $maxLinks   = (int)($config['security']['max_links'] ?? 0);
-if ($maxLinks > 0 && $longFields) {
+if ($linkDensityChecks && $maxLinks > 0 && $longFields) {
     foreach ($longFields as $lf) {
 	if (!empty($fields[$lf]) && is_string($fields[$lf])) {
 	    $links = count_links_in($fields[$lf]);
@@ -496,27 +522,29 @@ if ($errors) {
 }
 
 // Idempotency (drop duplicate) — multi-field aware
-$idPayload = $fields;
-if (!empty($_FILES) && !empty($formCfg['files']['enabled']) && !empty($formCfg['files']['fields'])) {
-    $idFilesMeta = [];
-    foreach ($formCfg['files']['fields'] as $inputName => $_cfg) {
-	if (!isset($_FILES[$inputName])) continue;
-	$norm = normalize_files_array($_FILES[$inputName]);
-	// record original name + size for hash (not file contents)
-	$idFilesMeta[$inputName] = array_map(fn($f)=>[$f['name'] ?? '', (int)($f['size'] ?? 0)], $norm);
+if ($idempotencyEnabled) {
+    $idPayload = $fields;
+    if (!empty($_FILES) && !empty($formCfg['files']['enabled']) && !empty($formCfg['files']['fields'])) {
+	$idFilesMeta = [];
+	foreach ($formCfg['files']['fields'] as $inputName => $_cfg) {
+	    if (!isset($_FILES[$inputName])) continue;
+	    $norm = normalize_files_array($_FILES[$inputName]);
+	    // record original name + size for hash (not file contents)
+	    $idFilesMeta[$inputName] = array_map(fn($f)=>[$f['name'] ?? '', (int)($f['size'] ?? 0)], $norm);
+	}
+	if ($idFilesMeta) $idPayload['__files'] = $idFilesMeta;
     }
-    if ($idFilesMeta) $idPayload['__files'] = $idFilesMeta;
+    $idemHash = hash('sha256', json_encode($idPayload) . '|' . $ip . '|' . $ua);
+    $idemFile = $idemDir . '/' . $idemHash . '.flag';
+    $idemTtl  = (int)$config['idempotency']['ttl_sec'];
+    if (is_file($idemFile) && (filemtime($idemFile) + $idemTtl) > $now) {
+	log_event($logFile, $config['logging'], 'info', 'duplicate_submit_dropped', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId]);
+	$payload = ['ok'=>true,'message'=>'Thank you.','request_id'=>$rid];
+	json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
+	exit;
+    }
+    @touch($idemFile);
 }
-$idemHash = hash('sha256', json_encode($idPayload) . '|' . $ip . '|' . $ua);
-$idemFile = $idemDir . '/' . $idemHash . '.flag';
-$idemTtl  = (int)$config['idempotency']['ttl_sec'];
-if (is_file($idemFile) && (filemtime($idemFile) + $idemTtl) > $now) {
-    log_event($logFile, $config['logging'], 'info', 'duplicate_submit_dropped', ['rid'=>$rid,'ip'=>$ip,'form'=>$formId]);
-    $payload = ['ok'=>true,'message'=>'Thank you.','request_id'=>$rid];
-    json_response($payload, $formCfg['redirect_success'] ?? null, $formCfg['redirect_error'] ?? null);
-    exit;
-}
-@touch($idemFile);
 
 // Process file uploads — multi-field
 $savedFiles = []; // each: ['field','label','original','path','mime','size','attach','persist']
